@@ -48,14 +48,16 @@ jobs:
         if: steps.check_release.outputs.exists != '200'
         run: |
           sudo apt-get install -y squashfs-tools
-          # Find squashfs offset inside the AppImage
+          # Scan first 64KB for squashfs magic bytes
           OFFSET=$(python3 -c "
           with open('OnlyOffice.AppImage', 'rb') as f:
-              data = f.read(1024)
-          idx = data.find(b'hsqs')
-          if idx == -1:
-              idx = data.find(b'sqsh')
-          print(idx)
+              data = f.read(65536)
+          found = -1
+          for magic in [b'hsqs', b'sqsh']:
+              idx = data.find(magic)
+              if idx != -1 and (found == -1 or idx < found):
+                  found = idx
+          print(found if found != -1 else 188)
           ")
           echo "Squashfs offset: $OFFSET"
           unsquashfs -o $OFFSET -d onlyoffice-extracted OnlyOffice.AppImage
