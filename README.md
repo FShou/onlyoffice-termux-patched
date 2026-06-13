@@ -1,120 +1,102 @@
-# OnlyOffice aarch64 Termux/Proot Patched
+# OnlyOffice Desktop Editors aarch64 Patched
 
-OnlyOffice Desktop Editors patched to run on **aarch64 (ARM64)** Android devices using **Termux proot-distro** or any proot/chroot-based Linux environment (e.g. [Tiny Computer](https://github.com/search?q=tiny+computer+android)).
+Automatically patches the official ARM64 build of ONLYOFFICE Desktop Editors to run on Android aarch64 environments such as Termux Proot, Debian Proot, Ubuntu Proot, and Tiny Computer.
 
-The original AppImage fails with this error on proot environments:
+## Why This Exists
 
+Recent ARM64 builds of ONLYOFFICE Desktop Editors may fail to start inside Android-based Linux environments with an error similar to:
+
+```text
+libQt5Gui.so.5: cannot enable executable stack as shared object requires: Permission denied
 ```
-./DesktopEditors: error while loading shared libraries: libQt5Gui.so.5:
-cannot enable executable stack as shared object requires: Permission denied
-```
 
-This is because `libQt5Gui.so.5` has an executable stack flag set, which is blocked by Android's kernel security policy. This patched build clears that flag.
+This repository automatically:
 
----
+1. Downloads the latest ARM64 release of ONLYOFFICE Desktop Editors.
+2. Extracts the Debian package.
+3. Patches `libQt5Gui.so.5` by clearing the executable stack flag.
+4. Rebuilds the package.
+5. Publishes a patched release on GitHub.
 
-## Download
+## Features
 
-Grab the latest `.AppImage` from the [Releases](../../releases) page.
+* Automatic weekly update checks
+* Manual workflow trigger support
+* Downloads directly from official ONLYOFFICE GitHub releases
+* Creates versioned GitHub releases
+* Rebuilds patched `.deb` packages automatically
 
----
+## Installation
 
-## How to Run (Termux / Proot)
+Download the latest patched release from the Releases page.
 
-Since FUSE is not available in proot environments, you need to extract and run it manually:
+Install:
 
 ```bash
-# Extract the AppImage
-./OnlyOffice-patched.AppImage --appimage-extract
-
-# Run it
-cd squashfs-root
-./AppRun
+dpkg -i onlyoffice-desktopeditors-<version>-aarch64-patched.deb
 ```
 
----
-
-## How We Patched It
-
-### 1. Extract the original AppImage
+If dependencies are missing:
 
 ```bash
-./OnlyOffice.AppImage --appimage-extract
-cd squashfs-root
+apt --fix-broken install
 ```
 
-### 2. Find the problematic library
+## Running
 
 ```bash
-find ~/squashfs-root -name "libQt5Gui.so*"
-# Output: /home/tiny/squashfs-root/usr/bin/libQt5Gui.so.5
+onlyoffice-desktopeditors
 ```
 
-### 3. Clear the executable stack flag with Python
+## Supported Environments
 
-Since `execstack` is not available in proot/Termux environments, we patch the ELF binary directly using Python:
+* Termux + proot-distro
+* Debian Proot
+* Ubuntu Proot
+* Tiny Computer
+* Other Android ARM64 Linux environments
 
-```bash
-python3 - <<'EOF'
-import sys
+## How the Patch Works
 
-path = "./usr/bin/libQt5Gui.so.5"
+The workflow locates:
 
-with open(path, "r+b") as f:
-    data = bytearray(f.read())
-
-found = False
-i = 0
-while i < len(data) - 8:
-    if data[i:i+4] == b'\x51\xe5\x74\x64':  # PT_GNU_STACK segment
-        print(f"Found GNU_STACK at offset {i}")
-        flags_offset = i + 4
-        flags = int.from_bytes(data[flags_offset:flags_offset+4], 'little')
-        print(f"Current flags: {flags:#010x}")
-        flags &= ~0x1  # clear PF_X (executable bit)
-        data[flags_offset:flags_offset+4] = flags.to_bytes(4, 'little')
-        print(f"New flags:     {flags:#010x}")
-        found = True
-        break
-    i += 1
-
-if not found:
-    print("GNU_STACK segment not found")
-    sys.exit(1)
-
-with open(path, "wb") as f:
-    f.write(data)
-print("Done!")
-EOF
+```text
+libQt5Gui.so.5
 ```
 
-### 4. Repackage into AppImage
+inside the package and clears the executable stack flag (`PF_X`) from the GNU_STACK segment.
 
-```bash
-cd ~
-mv squashfs-root onlyoffice-patched
+This fixes startup failures caused by Android's restrictions on executable stacks.
 
-# Download appimagetool for aarch64
-wget https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-aarch64.AppImage
-chmod +x appimagetool-aarch64.AppImage
+## GitHub Actions
 
-# Extract appimagetool (again, no FUSE)
-./appimagetool-aarch64.AppImage --appimage-extract
+The workflow runs:
 
-# Repackage
-./squashfs-root/AppRun ~/onlyoffice-patched OnlyOffice-patched.AppImage
+* Every Monday via cron
+* Manually through GitHub Actions
+
+When a new ONLYOFFICE release is detected:
+
+1. The package is downloaded.
+2. The patch is applied.
+3. A new GitHub Release is created.
+
+Release tags follow the format:
+
+```text
+v<version>-aarch64-patched
 ```
 
----
+Example:
 
-## Tested On
+```text
+v9.4.0-aarch64-patched
+```
 
-- Tiny Computer (Debian 12, aarch64) on Android
-- Should work on any Termux proot-distro (Debian/Ubuntu) on aarch64
+## Disclaimer
 
----
+This project is not affiliated with ONLYOFFICE.
 
-## Credits
+ONLYOFFICE Desktop Editors and all related trademarks belong to their respective owners.
 
-- [OnlyOffice](https://www.onlyoffice.com/) — the original app
-- Patch method inspired by the `execstack` tool, reimplemented in Python for environments where it is unavailable
+This repository only automates patching of the official ARM64 package and redistributes the resulting package under the terms of the original software license.
