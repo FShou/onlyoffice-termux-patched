@@ -5,6 +5,9 @@ on:
     - cron: '0 0 * * 1'  # Run every Monday to check for new releases
   workflow_dispatch:      # Allow manual trigger
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   patch-and-release:
     runs-on: ubuntu-latest
@@ -13,16 +16,16 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v5
 
-      - name: Get latest OnlyOffice version
+      - name: Get latest OnlyOffice version and download URL
         id: get_version
         run: |
-          VERSION=$(curl -s https://download.onlyoffice.com/install/desktop/editors/linux/onlyoffice-desktopeditors_aarch64.deb -I | grep -i location | grep -oP '\d+\.\d+\.\d+' | head -1)
-          # Fallback: scrape the download page
-          if [ -z "$VERSION" ]; then
-            VERSION=$(curl -s https://api.github.com/repos/ONLYOFFICE/DesktopEditors/releases/latest | jq -r '.tag_name' | tr -d 'v')
-          fi
+          RELEASE=$(curl -s https://api.github.com/repos/ONLYOFFICE/DesktopEditors/releases/latest)
+          VERSION=$(echo "$RELEASE" | jq -r '.tag_name' | tr -d 'v')
+          URL="https://github.com/ONLYOFFICE/DesktopEditors/releases/latest/download/DesktopEditors-arm64.AppImage"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Detected version: $VERSION"
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
+          echo "URL: $URL"
 
       - name: Check if already patched
         id: check_release
@@ -33,18 +36,20 @@ jobs:
             https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG)
           echo "exists=$EXISTS" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Status: $EXISTS"
 
-      - name: Download OnlyOffice aarch64 deb
+      - name: Download OnlyOffice arm64 AppImage
         if: steps.check_release.outputs.exists != '200'
         run: |
-          curl -L -o onlyoffice.deb \
-            "https://download.onlyoffice.com/install/desktop/editors/linux/onlyoffice-desktopeditors_aarch64.deb"
+          curl -L -o OnlyOffice.AppImage "${{ steps.get_version.outputs.url }}"
+          file OnlyOffice.AppImage
 
-      - name: Extract deb
+      - name: Extract AppImage
         if: steps.check_release.outputs.exists != '200'
         run: |
-          mkdir -p onlyoffice-extracted
-          dpkg-deb -x onlyoffice.deb onlyoffice-extracted/
+          chmod +x OnlyOffice.AppImage
+          ./OnlyOffice.AppImage --appimage-extract
+          mv squashfs-root onlyoffice-extracted
 
       - name: Find and patch libQt5Gui.so.5
         if: steps.check_release.outputs.exists != '200'
@@ -90,23 +95,23 @@ jobs:
           print("Patch applied successfully!")
           EOF
 
-      - name: Repack deb
+      - name: Repackage into AppImage
         if: steps.check_release.outputs.exists != '200'
         run: |
-          # Preserve control files
-          mkdir -p onlyoffice-extracted/DEBIAN
-          dpkg-deb -e onlyoffice.deb onlyoffice-extracted/DEBIAN/
+          # Download appimagetool for x86_64 (CI runner is x86_64)
+          curl -L -o appimagetool.AppImage \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool.AppImage
+          ./appimagetool.AppImage --appimage-extract
+          mv squashfs-root appimagetool-extracted
 
-          # Update package name in control file
-          sed -i 's/^Package:.*/Package: onlyoffice-desktopeditors-aarch64-patched/' \
-            onlyoffice-extracted/DEBIAN/control
+          # Repackage — set arch to aarch64
+          ARCH=aarch64 ./appimagetool-extracted/AppRun \
+            onlyoffice-extracted \
+            OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
 
-          # Repack
-          dpkg-deb -b onlyoffice-extracted \
-            onlyoffice-desktopeditors-${{ steps.get_version.outputs.version }}-aarch64-patched.deb
-
-          echo "Repacked successfully!"
-          ls -lh *.deb
+          echo "Repackaged successfully!"
+          ls -lh *.AppImage
 
       - name: Create GitHub Release
         if: steps.check_release.outputs.exists != '200'
@@ -125,16 +130,19 @@ jobs:
             libQt5Gui.so.5: cannot enable executable stack as shared object requires: Permission denied
             ```
 
-            ### Install
+            ### How to run (no FUSE / Termux / proot)
             ```bash
-            dpkg -i onlyoffice-desktopeditors-${{ steps.get_version.outputs.version }}-aarch64-patched.deb
+            ./OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage --appimage-extract
+            cd squashfs-root
+            ./AppRun
             ```
 
-            ### Run
+            ### How to run (normal Linux with FUSE)
             ```bash
-            onlyoffice-desktopeditors
+            chmod +x OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
+            ./OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
             ```
-          files: onlyoffice-desktopeditors-${{ steps.get_version.outputs.version }}-aarch64-patched.deb
+          files: OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Skip if already released
