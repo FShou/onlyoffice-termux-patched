@@ -16,16 +16,13 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v5
 
-      - name: Get latest OnlyOffice version and download URL
+      - name: Get latest OnlyOffice version
         id: get_version
         run: |
           RELEASE=$(curl -s https://api.github.com/repos/ONLYOFFICE/DesktopEditors/releases/latest)
           VERSION=$(echo "$RELEASE" | jq -r '.tag_name' | tr -d 'v')
-          URL="https://github.com/ONLYOFFICE/DesktopEditors/releases/latest/download/DesktopEditors-arm64.AppImage"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "url=$URL" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
-          echo "URL: $URL"
 
       - name: Check if already patched
         id: check_release
@@ -38,34 +35,34 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Status: $EXISTS"
 
-      - name: Download OnlyOffice arm64 AppImage
-        if: steps.check_release.outputs.exists != '200'
+  patch:
+    needs: patch-and-release
+    if: needs.patch-and-release.outputs.exists != '200'
+    runs-on: ubuntu-latest
+    container:
+      image: arm64v8/debian:bookworm
+
+    steps:
+      - name: Install dependencies
         run: |
-          curl -L -o OnlyOffice.AppImage "${{ steps.get_version.outputs.url }}"
+          apt-get update
+          apt-get install -y curl python3 file
+
+      - name: Download OnlyOffice arm64 AppImage
+        run: |
+          curl -L -o OnlyOffice.AppImage \
+            "https://github.com/ONLYOFFICE/DesktopEditors/releases/latest/download/DesktopEditors-arm64.AppImage"
           file OnlyOffice.AppImage
 
       - name: Extract AppImage
-        if: steps.check_release.outputs.exists != '200'
         run: |
-          sudo apt-get install -y squashfs-tools
-          # Scan first 64KB for squashfs magic bytes
-          OFFSET=$(python3 -c "
-          with open('OnlyOffice.AppImage', 'rb') as f:
-              data = f.read(65536)
-          found = -1
-          for magic in [b'hsqs', b'sqsh']:
-              idx = data.find(magic)
-              if idx != -1 and (found == -1 or idx < found):
-                  found = idx
-          print(found if found != -1 else 188)
-          ")
-          echo "Squashfs offset: $OFFSET"
-          unsquashfs -o $OFFSET -d onlyoffice-extracted OnlyOffice.AppImage
+          chmod +x OnlyOffice.AppImage
+          ./OnlyOffice.AppImage --appimage-extract
+          mv squashfs-root onlyoffice-patched
 
       - name: Find and patch libQt5Gui.so.5
-        if: steps.check_release.outputs.exists != '200'
         run: |
-          LIB_PATH=$(find onlyoffice-extracted -name "libQt5Gui.so.5" | head -1)
+          LIB_PATH=$(find onlyoffice-patched -name "libQt5Gui.so.5" | head -1)
           echo "Found lib at: $LIB_PATH"
 
           if [ -z "$LIB_PATH" ]; then
@@ -107,31 +104,47 @@ jobs:
           EOF
 
       - name: Repackage into AppImage
-        if: steps.check_release.outputs.exists != '200'
         run: |
-          # Download appimagetool for x86_64 (CI runner is x86_64)
-          curl -L -o appimagetool.AppImage \
-            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
-          chmod +x appimagetool.AppImage
-          ./appimagetool.AppImage --appimage-extract
+          apt-get install -y wget
+          # Download appimagetool for aarch64
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-aarch64.AppImage
+          chmod +x appimagetool-aarch64.AppImage
+          # Extract appimagetool (no FUSE in container)
+          ./appimagetool-aarch64.AppImage --appimage-extract
           mv squashfs-root appimagetool-extracted
 
-          # Repackage — set arch to aarch64
-          ARCH=aarch64 ./appimagetool-extracted/AppRun \
-            onlyoffice-extracted \
-            OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
+          # Repackage
+          VERSION=${{ needs.patch-and-release.outputs.version }}
+          ./appimagetool-extracted/AppRun \
+            onlyoffice-patched \
+            OnlyOffice-${VERSION}-aarch64-patched.AppImage
 
-          echo "Repackaged successfully!"
+          echo "Done!"
           ls -lh *.AppImage
 
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: onlyoffice-patched
+          path: OnlyOffice-*-aarch64-patched.AppImage
+
+  release:
+    needs: [patch-and-release, patch]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: onlyoffice-patched
+
       - name: Create GitHub Release
-        if: steps.check_release.outputs.exists != '200'
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ steps.check_release.outputs.tag }}
-          name: OnlyOffice ${{ steps.get_version.outputs.version }} - aarch64 Patched
+          tag_name: ${{ needs.patch-and-release.outputs.tag }}
+          name: OnlyOffice ${{ needs.patch-and-release.outputs.version }} - aarch64 Patched
           body: |
-            ## OnlyOffice Desktop ${{ steps.get_version.outputs.version }} — aarch64 Termux/Proot Patched
+            ## OnlyOffice Desktop ${{ needs.patch-and-release.outputs.version }} — aarch64 Termux/Proot Patched
 
             Automatically patched build of OnlyOffice for **aarch64 Android** devices running Termux proot-distro or Tiny Computer.
 
@@ -143,19 +156,15 @@ jobs:
 
             ### How to run (no FUSE / Termux / proot)
             ```bash
-            ./OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage --appimage-extract
+            ./OnlyOffice-${{ needs.patch-and-release.outputs.version }}-aarch64-patched.AppImage --appimage-extract
             cd squashfs-root
             ./AppRun
             ```
 
             ### How to run (normal Linux with FUSE)
             ```bash
-            chmod +x OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
-            ./OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
+            chmod +x OnlyOffice-${{ needs.patch-and-release.outputs.version }}-aarch64-patched.AppImage
+            ./OnlyOffice-${{ needs.patch-and-release.outputs.version }}-aarch64-patched.AppImage
             ```
-          files: OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
+          files: OnlyOffice-*-aarch64-patched.AppImage
           token: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Skip if already released
-        if: steps.check_release.outputs.exists == '200'
-        run: echo "Release ${{ steps.check_release.outputs.tag }} already exists, skipping."
