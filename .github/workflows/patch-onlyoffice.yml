@@ -2,8 +2,8 @@ name: Patch OnlyOffice for aarch64 Termux/Proot
 
 on:
   schedule:
-    - cron: '0 0 * * 1'  # Run every Monday to check for new releases
-  workflow_dispatch:      # Allow manual trigger
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -28,143 +28,86 @@ jobs:
         id: check_release
         run: |
           TAG="v${{ steps.get_version.outputs.version }}-aarch64-patched"
-          EXISTS=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG)
+          EXISTS=$(curl -s -o /dev/null -w "%{http_code}"             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"             https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG)
           echo "exists=$EXISTS" >> $GITHUB_OUTPUT
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Status: $EXISTS"
 
-  patch:
-    needs: patch-and-release
-    if: needs.patch-and-release.outputs.exists != '200'
-    runs-on: ubuntu-latest
-    container:
-      image: arm64v8/debian:bookworm
-
-    steps:
-      - name: Install dependencies
-        run: |
-          apt-get update
-          apt-get install -y curl python3 file
+      - name: Set up QEMU
+        if: steps.check_release.outputs.exists != '200'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Download OnlyOffice arm64 AppImage
+        if: steps.check_release.outputs.exists != '200'
         run: |
-          curl -L -o OnlyOffice.AppImage \
-            "https://github.com/ONLYOFFICE/DesktopEditors/releases/latest/download/DesktopEditors-arm64.AppImage"
+          curl -L -o OnlyOffice.AppImage             "https://github.com/ONLYOFFICE/DesktopEditors/releases/latest/download/DesktopEditors-arm64.AppImage"
           file OnlyOffice.AppImage
 
-      - name: Extract AppImage
+      - name: Extract, patch and repackage inside aarch64 container
+        if: steps.check_release.outputs.exists != '200'
+        env:
+          VERSION: ${{ steps.get_version.outputs.version }}
+          PATCH_SCRIPT: "aW1wb3J0IHN5cwpwYXRoID0gc3lzLmFyZ3ZbMV0KcHJpbnQoIlBhdGNoaW5nOiIsIHBhdGgpCmRhdGEgPSBieXRlYXJyYXkob3BlbihwYXRoLCAicmIiKS5yZWFkKCkpCmZvdW5kID0gRmFsc2UKaSA9IDAKd2hpbGUgaSA8IGxlbihkYXRhKSAtIDg6CiAgICBpZiBkYXRhW2k6aSs0XSA9PSBiJ1x4NTFceGU1XHg3NFx4NjQnOgogICAgICAgIGZsYWdzX29mZnNldCA9IGkgKyA0CiAgICAgICAgZmxhZ3MgPSBpbnQuZnJvbV9ieXRlcyhkYXRhW2ZsYWdzX29mZnNldDpmbGFnc19vZmZzZXQrNF0sICJsaXR0bGUiKQogICAgICAgIHByaW50KCJDdXJyZW50IGZsYWdzOiIsIGhleChmbGFncykpCiAgICAgICAgZmxhZ3MgJj0gfjB4MQogICAgICAgIGRhdGFbZmxhZ3Nfb2Zmc2V0OmZsYWdzX29mZnNldCs0XSA9IGZsYWdzLnRvX2J5dGVzKDQsICJsaXR0bGUiKQogICAgICAgIHByaW50KCJOZXcgZmxhZ3M6IiwgaGV4KGZsYWdzKSkKICAgICAgICBmb3VuZCA9IFRydWUKICAgICAgICBicmVhawogICAgaSArPSAxCmlmIG5vdCBmb3VuZDoKICAgIHByaW50KCJFUlJPUjogR05VX1NUQUNLIG5vdCBmb3VuZCIpCiAgICBzeXMuZXhpdCgxKQpvcGVuKHBhdGgsICJ3YiIpLndyaXRlKGRhdGEpCnByaW50KCJEb25lISIpCg=="
         run: |
-          chmod +x OnlyOffice.AppImage
-          ./OnlyOffice.AppImage --appimage-extract
-          mv squashfs-root onlyoffice-patched
+          docker run --rm --platform linux/arm64             -v "$PWD:/work"             -w /work             -e VERSION="$VERSION"             -e PATCH_SCRIPT="$PATCH_SCRIPT"             arm64v8/debian:bookworm             bash -exc '
+              apt-get update -qq
+              apt-get install -y -qq python3 wget
 
-      - name: Find and patch libQt5Gui.so.5
-        run: |
-          LIB_PATH=$(find onlyoffice-patched -name "libQt5Gui.so.5" | head -1)
-          echo "Found lib at: $LIB_PATH"
+              echo "--- Extracting AppImage ---"
+              chmod +x OnlyOffice.AppImage
+              ./OnlyOffice.AppImage --appimage-extract
+              mv squashfs-root onlyoffice-patched
 
-          if [ -z "$LIB_PATH" ]; then
-            echo "ERROR: libQt5Gui.so.5 not found!"
-            exit 1
-          fi
+              echo "--- Patching libQt5Gui.so.5 ---"
+              LIB=$(find onlyoffice-patched -name "libQt5Gui.so.5" | head -1)
+              echo "Found: $LIB"
+              echo "$PATCH_SCRIPT" | base64 -d > patch.py
+              python3 patch.py "$LIB"
 
-          python3 - "$LIB_PATH" <<'EOF'
-          import sys
+              echo "--- Downloading appimagetool ---"
+              wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-aarch64.AppImage
+              chmod +x appimagetool-aarch64.AppImage
+              ./appimagetool-aarch64.AppImage --appimage-extract
+              mv squashfs-root appimagetool-extracted
 
-          path = sys.argv[1]
-          print(f"Patching: {path}")
-
-          with open(path, "r+b") as f:
-              data = bytearray(f.read())
-
-          found = False
-          i = 0
-          while i < len(data) - 8:
-              if data[i:i+4] == b'\x51\xe5\x74\x64':  # PT_GNU_STACK
-                  print(f"Found GNU_STACK at offset {i}")
-                  flags_offset = i + 4
-                  flags = int.from_bytes(data[flags_offset:flags_offset+4], 'little')
-                  print(f"Current flags: {flags:#010x}")
-                  flags &= ~0x1  # clear PF_X (executable bit)
-                  data[flags_offset:flags_offset+4] = flags.to_bytes(4, 'little')
-                  print(f"New flags:     {flags:#010x}")
-                  found = True
-                  break
-              i += 1
-
-          if not found:
-              print("ERROR: GNU_STACK segment not found!")
-              sys.exit(1)
-
-          with open(path, "wb") as f:
-              f.write(data)
-          print("Patch applied successfully!")
-          EOF
-
-      - name: Repackage into AppImage
-        run: |
-          apt-get install -y wget
-          # Download appimagetool for aarch64
-          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-aarch64.AppImage
-          chmod +x appimagetool-aarch64.AppImage
-          # Extract appimagetool (no FUSE in container)
-          ./appimagetool-aarch64.AppImage --appimage-extract
-          mv squashfs-root appimagetool-extracted
-
-          # Repackage
-          VERSION=${{ needs.patch-and-release.outputs.version }}
-          ./appimagetool-extracted/AppRun \
-            onlyoffice-patched \
-            OnlyOffice-${VERSION}-aarch64-patched.AppImage
-
-          echo "Done!"
-          ls -lh *.AppImage
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: onlyoffice-patched
-          path: OnlyOffice-*-aarch64-patched.AppImage
-
-  release:
-    needs: [patch-and-release, patch]
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: onlyoffice-patched
+              echo "--- Repackaging ---"
+              ./appimagetool-extracted/AppRun onlyoffice-patched OnlyOffice-${VERSION}-aarch64-patched.AppImage
+              ls -lh OnlyOffice-${VERSION}-aarch64-patched.AppImage
+            '
 
       - name: Create GitHub Release
+        if: steps.check_release.outputs.exists != '200'
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ needs.patch-and-release.outputs.tag }}
-          name: OnlyOffice ${{ needs.patch-and-release.outputs.version }} - aarch64 Patched
+          tag_name: ${{ steps.check_release.outputs.tag }}
+          name: OnlyOffice ${{ steps.get_version.outputs.version }} - aarch64 Patched
           body: |
-            ## OnlyOffice Desktop ${{ needs.patch-and-release.outputs.version }} — aarch64 Termux/Proot Patched
+            ## OnlyOffice Desktop ${{ steps.get_version.outputs.version }} — aarch64 Termux/Proot Patched
 
             Automatically patched build of OnlyOffice for **aarch64 Android** devices running Termux proot-distro or Tiny Computer.
 
             ### What was patched
-            Cleared the executable stack flag (`PF_X`) on `libQt5Gui.so.5` to fix:
+            Cleared the executable stack flag on `libQt5Gui.so.5` to fix:
             ```
             libQt5Gui.so.5: cannot enable executable stack as shared object requires: Permission denied
             ```
 
-            ### How to run (no FUSE / Termux / proot)
+            ### How to run (Termux / proot / no FUSE)
             ```bash
-            ./OnlyOffice-${{ needs.patch-and-release.outputs.version }}-aarch64-patched.AppImage --appimage-extract
+            ./OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage --appimage-extract
             cd squashfs-root
             ./AppRun
             ```
 
             ### How to run (normal Linux with FUSE)
             ```bash
-            chmod +x OnlyOffice-${{ needs.patch-and-release.outputs.version }}-aarch64-patched.AppImage
-            ./OnlyOffice-${{ needs.patch-and-release.outputs.version }}-aarch64-patched.AppImage
+            chmod +x OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
+            ./OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
             ```
-          files: OnlyOffice-*-aarch64-patched.AppImage
+          files: OnlyOffice-${{ steps.get_version.outputs.version }}-aarch64-patched.AppImage
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if already released
+        if: steps.check_release.outputs.exists == '200'
+        run: echo "Release ${{ steps.check_release.outputs.tag }} already exists, skipping."
