@@ -55,6 +55,7 @@ jobs:
               apt-get install -y -qq python3 wget
 
               echo "--- Extracting AppImage ---"
+              file OnlyOffice.AppImage
               chmod +x OnlyOffice.AppImage
               ./OnlyOffice.AppImage --appimage-extract
               mv squashfs-root onlyoffice-patched
