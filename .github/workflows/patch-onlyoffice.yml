@@ -1,0 +1,142 @@
+name: Patch OnlyOffice for aarch64 Termux/Proot
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'  # Run every Monday to check for new releases
+  workflow_dispatch:      # Allow manual trigger
+
+jobs:
+  patch-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Get latest OnlyOffice version
+        id: get_version
+        run: |
+          VERSION=$(curl -s https://download.onlyoffice.com/install/desktop/editors/linux/onlyoffice-desktopeditors_aarch64.deb -I | grep -i location | grep -oP '\d+\.\d+\.\d+' | head -1)
+          # Fallback: scrape the download page
+          if [ -z "$VERSION" ]; then
+            VERSION=$(curl -s https://api.github.com/repos/ONLYOFFICE/DesktopEditors/releases/latest | jq -r '.tag_name' | tr -d 'v')
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Detected version: $VERSION"
+
+      - name: Check if already patched
+        id: check_release
+        run: |
+          TAG="v${{ steps.get_version.outputs.version }}-aarch64-patched"
+          EXISTS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG)
+          echo "exists=$EXISTS" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Download OnlyOffice aarch64 deb
+        if: steps.check_release.outputs.exists != '200'
+        run: |
+          curl -L -o onlyoffice.deb \
+            "https://download.onlyoffice.com/install/desktop/editors/linux/onlyoffice-desktopeditors_aarch64.deb"
+
+      - name: Extract deb
+        if: steps.check_release.outputs.exists != '200'
+        run: |
+          mkdir -p onlyoffice-extracted
+          dpkg-deb -x onlyoffice.deb onlyoffice-extracted/
+
+      - name: Find and patch libQt5Gui.so.5
+        if: steps.check_release.outputs.exists != '200'
+        run: |
+          LIB_PATH=$(find onlyoffice-extracted -name "libQt5Gui.so.5" | head -1)
+          echo "Found lib at: $LIB_PATH"
+
+          if [ -z "$LIB_PATH" ]; then
+            echo "ERROR: libQt5Gui.so.5 not found!"
+            exit 1
+          fi
+
+          python3 - "$LIB_PATH" <<'EOF'
+          import sys
+
+          path = sys.argv[1]
+          print(f"Patching: {path}")
+
+          with open(path, "r+b") as f:
+              data = bytearray(f.read())
+
+          found = False
+          i = 0
+          while i < len(data) - 8:
+              if data[i:i+4] == b'\x51\xe5\x74\x64':  # PT_GNU_STACK
+                  print(f"Found GNU_STACK at offset {i}")
+                  flags_offset = i + 4
+                  flags = int.from_bytes(data[flags_offset:flags_offset+4], 'little')
+                  print(f"Current flags: {flags:#010x}")
+                  flags &= ~0x1  # clear PF_X (executable bit)
+                  data[flags_offset:flags_offset+4] = flags.to_bytes(4, 'little')
+                  print(f"New flags:     {flags:#010x}")
+                  found = True
+                  break
+              i += 1
+
+          if not found:
+              print("ERROR: GNU_STACK segment not found!")
+              sys.exit(1)
+
+          with open(path, "wb") as f:
+              f.write(data)
+          print("Patch applied successfully!")
+          EOF
+
+      - name: Repack deb
+        if: steps.check_release.outputs.exists != '200'
+        run: |
+          # Preserve control files
+          mkdir -p onlyoffice-extracted/DEBIAN
+          dpkg-deb -e onlyoffice.deb onlyoffice-extracted/DEBIAN/
+
+          # Update package name in control file
+          sed -i 's/^Package:.*/Package: onlyoffice-desktopeditors-aarch64-patched/' \
+            onlyoffice-extracted/DEBIAN/control
+
+          # Repack
+          dpkg-deb -b onlyoffice-extracted \
+            onlyoffice-desktopeditors-${{ steps.get_version.outputs.version }}-aarch64-patched.deb
+
+          echo "Repacked successfully!"
+          ls -lh *.deb
+
+      - name: Create GitHub Release
+        if: steps.check_release.outputs.exists != '200'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.check_release.outputs.tag }}
+          name: OnlyOffice ${{ steps.get_version.outputs.version }} - aarch64 Patched
+          body: |
+            ## OnlyOffice Desktop ${{ steps.get_version.outputs.version }} — aarch64 Termux/Proot Patched
+
+            Automatically patched build of OnlyOffice for **aarch64 Android** devices running Termux proot-distro or Tiny Computer.
+
+            ### What was patched
+            Cleared the executable stack flag (`PF_X`) on `libQt5Gui.so.5` to fix:
+            ```
+            libQt5Gui.so.5: cannot enable executable stack as shared object requires: Permission denied
+            ```
+
+            ### Install
+            ```bash
+            dpkg -i onlyoffice-desktopeditors-${{ steps.get_version.outputs.version }}-aarch64-patched.deb
+            ```
+
+            ### Run
+            ```bash
+            onlyoffice-desktopeditors
+            ```
+          files: onlyoffice-desktopeditors-${{ steps.get_version.outputs.version }}-aarch64-patched.deb
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if already released
+        if: steps.check_release.outputs.exists == '200'
+        run: echo "Release ${{ steps.check_release.outputs.tag }} already exists, skipping."
